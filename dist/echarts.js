@@ -1918,6 +1918,7 @@ return /******/ (function(modules) { // webpackBootstrap
 	    echarts.graphic = __webpack_require__(43);
 	    echarts.number = __webpack_require__(7);
 	    echarts.format = __webpack_require__(6);
+	    echarts.throttle = throttle.throttle;
 	    echarts.matrix = __webpack_require__(11);
 	    echarts.vector = __webpack_require__(10);
 	    echarts.color = __webpack_require__(39);
@@ -5391,36 +5392,20 @@ return /******/ (function(modules) { // webpackBootstrap
 	        },
 
 	        /**
-	         * @param {string} path
+	         * @param {string|Array.<string>} path
 	         * @param {boolean} [ignoreParent=false]
 	         * @return {*}
 	         */
 	        get: function (path, ignoreParent) {
-	            if (!path) {
+	            if (path == null) {
 	                return this.option;
 	            }
 
-	            if (typeof path === 'string') {
-	                path = path.split('.');
-	            }
-
-	            var obj = this.option;
-	            var parentModel = this.parentModel;
-	            for (var i = 0; i < path.length; i++) {
-	                // Ignore empty
-	                if (!path[i]) {
-	                    continue;
-	                }
-	                // obj could be number/string/... (like 0)
-	                obj = (obj && typeof obj === 'object') ? obj[path[i]] : null;
-	                if (obj == null) {
-	                    break;
-	                }
-	            }
-	            if (obj == null && parentModel && !ignoreParent) {
-	                obj = parentModel.get(path);
-	            }
-	            return obj;
+	            return doGet(
+	                this.option,
+	                this.parsePath(path),
+	                !ignoreParent && getParent(this, path)
+	            );
 	        },
 
 	        /**
@@ -5432,26 +5417,30 @@ return /******/ (function(modules) { // webpackBootstrap
 	            var option = this.option;
 
 	            var val = option == null ? option : option[key];
-	            var parentModel = this.parentModel;
-	            if (val == null && parentModel && !ignoreParent) {
+	            var parentModel = !ignoreParent && getParent(this, key);
+	            if (val == null && parentModel) {
 	                val = parentModel.getShallow(key);
 	            }
 	            return val;
 	        },
 
 	        /**
-	         * @param {string} path
+	         * @param {string|Array.<string>} path
 	         * @param {module:echarts/model/Model} [parentModel]
 	         * @return {module:echarts/model/Model}
 	         */
 	        getModel: function (path, parentModel) {
-	            var obj = this.get(path, true);
-	            var thisParentModel = this.parentModel;
-	            var model = new Model(
-	                obj, parentModel || (thisParentModel && thisParentModel.getModel(path)),
-	                this.ecModel
+	            var obj = path == null
+	                ? this.option
+	                : doGet(this.option, path = this.parsePath(path));
+
+	            var thisParentModel;
+	            parentModel = parentModel || (
+	                (thisParentModel = getParent(this, path))
+	                    && thisParentModel.getModel(path)
 	            );
-	            return model;
+
+	            return new Model(obj, parentModel, this.ecModel);
 	        },
 
 	        /**
@@ -5471,8 +5460,47 @@ return /******/ (function(modules) { // webpackBootstrap
 
 	        setReadOnly: function (properties) {
 	            clazzUtil.setReadOnly(this, properties);
+	        },
+
+	        // If path is null/undefined, return null/undefined.
+	        parsePath: function(path) {
+	            if (typeof path === 'string') {
+	                path = path.split('.');
+	            }
+	            return path;
+	        },
+
+	        /**
+	         * @param {Function} getParent
+	         *        param {Array.<string>|string} path
+	         *        return {module:echarts/model/Model}
+	         */
+	        customizeGetParent: function (getParent) {
+	            this.__getParent = getParent;
 	        }
 	    };
+
+	    function doGet(obj, pathArr, parentModel) {
+	        for (var i = 0; i < pathArr.length; i++) {
+	            // Ignore empty
+	            if (!pathArr[i]) {
+	                continue;
+	            }
+	            // obj could be number/string/... (like 0)
+	            obj = (obj && typeof obj === 'object') ? obj[pathArr[i]] : null;
+	            if (obj == null) {
+	                break;
+	            }
+	        }
+	        if (obj == null && parentModel) {
+	            obj = parentModel.get(pathArr);
+	        }
+	        return obj;
+	    }
+
+	    function getParent(model, path) {
+	        return model.__getParent ? model.__getParent(path) : model.parentModel;
+	    }
 
 	    // Enable Model.extend.
 	    clazzUtil.enableClassExtend(Model);
@@ -29589,6 +29617,9 @@ return /******/ (function(modules) { // webpackBootstrap
 	            // 南丁格尔玫瑰图模式，'radius'（半径） | 'area'（面积）
 	            // roseType: null,
 
+	            // If still show when all data zero.
+	            stillShowZeroSum: true,
+
 	            label: {
 	                normal: {
 	                    // If rotate around circle
@@ -30229,6 +30260,7 @@ return /******/ (function(modules) { // webpackBootstrap
 	            var clockwise = seriesModel.get('clockwise');
 
 	            var roseType = seriesModel.get('roseType');
+	            var stillShowZeroSum = seriesModel.get('stillShowZeroSum');
 
 	            // [0...max]
 	            var extent = data.getDataExtent('value');
@@ -30243,9 +30275,26 @@ return /******/ (function(modules) { // webpackBootstrap
 	            var dir = clockwise ? 1 : -1;
 	            data.each('value', function (value, idx) {
 	                var angle;
+	                if (isNaN(value)) {
+	                    data.setItemLayout(idx, {
+	                        angle: NaN,
+	                        startAngle: NaN,
+	                        endAngle: NaN,
+	                        clockwise: clockwise,
+	                        cx: cx,
+	                        cy: cy,
+	                        r0: r0,
+	                        r: roseType
+	                            ? NaN
+	                            : r
+	                    });
+	                    return;
+	                }
+
 	                // FIXME 兼容 2.0 但是 roseType 是 area 的时候才是这样？
 	                if (roseType !== 'area') {
-	                    angle = sum === 0 ? unitRadian : (value * unitRadian);
+	                    angle = (sum === 0 && stillShowZeroSum)
+	                        ? unitRadian : (value * unitRadian);
 	                }
 	                else {
 	                    angle = PI2 / (data.count() || 1);
@@ -33772,7 +33821,17 @@ return /******/ (function(modules) { // webpackBootstrap
 	                // setItemGraphicEl, setHoverStyle after all polygons and labels
 	                // are added to the rigionGroup
 	                if (data) {
-	                    data.setItemGraphicEl(dataIdx, regionGroup);
+	                     var graph = data.getItemGraphicEl(dataIdx);
+	                     if(graph  instanceof graphic.Group){
+	                        regionGroup.eachChild(function(child){
+	                            graphic.setHoverStyle(child, hoverItemStyle,
+	                            {hoverSilentOnTouch: !!mapOrGeoModel.get('selectedMode')});
+	                            graph.add(child);
+	                        });
+	                        data.setItemGraphicEl(dataIdx, graph);
+	                     }else{
+	                        data.setItemGraphicEl(dataIdx, regionGroup);
+	                     }
 	                }
 	                else {
 	                    var regionModel = mapOrGeoModel.getRegionModel(region.name);
@@ -38233,21 +38292,24 @@ return /******/ (function(modules) { // webpackBootstrap
 	                });
 
 	                var edgeLabelModel = self.getModel('edgeLabel');
-	                var wrappedGetEdgeModel = function (path, parentModel) {
-	                    var pathArr = (path || '').split('.');
-	                    if (pathArr[0] === 'label') {
-	                        parentModel = parentModel
-	                            || edgeLabelModel.getModel(pathArr.slice(1));
-	                    }
-	                    var model = Model.prototype.getModel.call(this, pathArr, parentModel);
-	                    model.getModel = wrappedGetEdgeModel;
-	                    return model;
-	                };
+	                // For option `edgeLabel` can be found by label.xxx.xxx on item mode.
+	                var fakeSeriesModel = new Model(
+	                    {label: edgeLabelModel.option},
+	                    edgeLabelModel.parentModel,
+	                    ecModel
+	                );
+
 	                edgeData.wrapMethod('getItemModel', function (model) {
-	                    // FIXME Wrap get method ?
-	                    model.getModel = wrappedGetEdgeModel;
+	                    model.customizeGetParent(edgeGetParent);
 	                    return model;
 	                });
+
+	                function edgeGetParent(path) {
+	                    path = this.parsePath(path);
+	                    return (path && path[0] === 'label')
+	                        ? fakeSeriesModel
+	                        : this.parentModel;
+	                }
 	            }
 	        },
 
@@ -49907,7 +49969,8 @@ return /******/ (function(modules) { // webpackBootstrap
 	                // In which case, the data is not main data in series.
 	                var dataModel = el.dataModel || ecModel.getSeriesByIndex(el.seriesIndex);
 	                var dataIndex = el.dataIndex;
-	                var itemModel = dataModel.getData().getItemModel(dataIndex);
+	                var data = dataModel.getData();
+	                var itemModel = data.getItemModel(dataIndex);
 	                // Series or single data may use item trigger when global is axis trigger
 	                if ((itemModel.get('tooltip.trigger') || globalTrigger) === 'axis') {
 	                    this._showAxisTooltip(tooltipModel, ecModel, e);
@@ -49926,7 +49989,8 @@ return /******/ (function(modules) { // webpackBootstrap
 	                api.dispatchAction({
 	                    type: 'showTip',
 	                    from: this.uid,
-	                    dataIndexInside: el.dataIndex,
+	                    dataIndexInside: dataIndex,
+	                    dataIndex: data.getRawIndex(dataIndex), // expose to user.
 	                    seriesIndex: el.seriesIndex
 	                });
 	            }
@@ -50401,6 +50465,10 @@ return /******/ (function(modules) { // webpackBootstrap
 	            var baseAxis = coordSys.getBaseAxis();
 	            var baseDimIndex = baseAxis.dim === 'x' || baseAxis.dim === 'radius' ? 0 : 1;
 
+	            if (!seriesList.length) {
+	                return;
+	            }
+
 	            var payloadBatch = zrUtil.map(seriesList, function (series) {
 	                return {
 	                    seriesIndex: series.seriesIndex,
@@ -50441,9 +50509,12 @@ return /******/ (function(modules) { // webpackBootstrap
 	                lastHover.payloadBatch = payloadBatch;
 	            }
 	            // Dispatch showTip action
+	            var dataIndex = payloadBatch[sampleSeriesIndex].dataIndexInside;
 	            api.dispatchAction({
 	                type: 'showTip',
-	                dataIndexInside: payloadBatch[sampleSeriesIndex].dataIndexInside,
+	                dataIndexInside: dataIndex,
+	                // expose to user.
+	                dataIndex: seriesList[sampleSeriesIndex].getData().getRawIndex(dataIndex),
 	                seriesIndex: payloadBatch[sampleSeriesIndex].seriesIndex,
 	                from: this.uid
 	            });
